@@ -13,12 +13,11 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Ensure the legacy extraction code is importable
 _PCAP2CSV_DIR = str(Path(__file__).resolve().parent.parent.parent / "utils" / "pcap2csv")
 if _PCAP2CSV_DIR not in sys.path:
     sys.path.insert(0, _PCAP2CSV_DIR)
 
-# The 46 features the scaler/model were trained on, in exact order.
+
 MODEL_FEATURES: list[str] = [
     "flow_duration", "header_length", "protocol_type", "duration", "rate",
     "srate", "drate", "fin_flag_number", "syn_flag_number", "rst_flag_number",

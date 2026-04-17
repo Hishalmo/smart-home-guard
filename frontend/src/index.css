@@ -24,7 +24,7 @@ body {
   margin: 0;
   background: hsl(var(--surface-base));
   color: hsl(var(--content-primary));
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
