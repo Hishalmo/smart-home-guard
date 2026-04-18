@@ -4,13 +4,15 @@ import time
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.routers import health, analysis
+from backend.services.feature_service import FeatureService
 from backend.services.ml_service import MLService
-
-load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,6 +29,7 @@ async def lifespan(app: FastAPI):
     except FileNotFoundError as e:
         logger.warning("ML model files not found — running without model: %s", e)
     app.state.ml_service = ml_service
+    app.state.feature_service = FeatureService()
 
     yield
 

@@ -90,6 +90,65 @@ class FeatureService:
             "src_ip", "dst_ip", "src_port", "dst_port", "protocol_name", "timestamp",
         ])
 
+    async def aggregate_connectivity_per_flow(
+        self, pcap_path: str, flow_count: int, packets_per_flow: int = 10
+    ) -> pd.DataFrame:
+        """Per-flow identity DataFrame aligned 1:1 with extract_features().
+
+        The legacy pipeline aggregates every `packets_per_flow` (default 10)
+        packets into one flow row. This helper reads the raw per-packet
+        connectivity info and reduces each window to one representative
+        row using the column mode — robust to outlier packets and a few
+        dropped frames.
+        """
+        connectivity = await self.extract_connectivity_info(pcap_path)
+        return _chunked_mode_identity(connectivity, flow_count, packets_per_flow)
+
+
+def _mode_or_default(series: pd.Series, default):
+    """Return the first mode of a Series, falling back to `default` if empty."""
+    modes = series.dropna().mode()
+    if not modes.empty:
+        return modes.iloc[0]
+    non_null = series.dropna()
+    if not non_null.empty:
+        return non_null.iloc[0]
+    return default
+
+
+def _chunked_mode_identity(
+    connectivity: pd.DataFrame, flow_count: int, packets_per_flow: int
+) -> pd.DataFrame:
+    """Reduce per-packet connectivity to one representative row per flow."""
+    rows = []
+    for i in range(flow_count):
+        chunk = connectivity.iloc[i * packets_per_flow : (i + 1) * packets_per_flow]
+
+        if chunk.empty:
+            rows.append({
+                "src_ip": "UNKNOWN", "dst_ip": "UNKNOWN",
+                "src_port": 0, "dst_port": 0, "protocol_name": "UNKNOWN",
+            })
+            continue
+
+        src_ip = _mode_or_default(chunk["src_ip"], "UNKNOWN")
+        dst_ip = _mode_or_default(chunk["dst_ip"], "UNKNOWN")
+        protocol_name = _mode_or_default(chunk["protocol_name"], "UNKNOWN")
+
+        src_port_series = chunk.loc[chunk["src_ip"] == src_ip, "src_port"]
+        dst_port_series = chunk.loc[chunk["dst_ip"] == dst_ip, "dst_port"]
+        src_port = _mode_or_default(src_port_series, 0)
+        dst_port = _mode_or_default(dst_port_series, 0)
+
+        rows.append({
+            "src_ip": src_ip, "dst_ip": dst_ip,
+            "src_port": int(src_port) if pd.notna(src_port) else 0,
+            "dst_port": int(dst_port) if pd.notna(dst_port) else 0,
+            "protocol_name": protocol_name,
+        })
+
+    return pd.DataFrame(rows, columns=["src_ip", "dst_ip", "src_port", "dst_port", "protocol_name"])
+
 
 def _sync_extract_connectivity(pcap_path: str) -> list[list]:
     """Parse PCAP with dpkt to extract per-packet connection identity."""
