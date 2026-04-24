@@ -12,13 +12,17 @@ export function LoginPage() {
   const { login, register } = useAuth()
 
   const [mode, setMode] = useState<AuthMode>('signIn')
+  const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   const isEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-  const isFormValid = isEmailValid && password.length >= 6
+  const isFormValid =
+    isEmailValid &&
+    password.length >= 6 &&
+    (mode === 'signIn' || username.trim().length > 0)
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -29,7 +33,7 @@ export function LoginPage() {
       if (mode === 'signIn') {
         await login(email, password)
       } else {
-        await register(email, password)
+        await register(email, password, username.trim())
       }
 
       navigate('/dashboard')
@@ -77,6 +81,22 @@ export function LoginPage() {
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4 rounded-xl border border-border bg-surface-raised p-6">
+          {mode === 'signUp' && (
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-content-primary">
+                Username
+              </label>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Your display name"
+                required
+                className="w-full rounded-lg border border-border bg-surface-base px-3 py-2 text-sm text-content-primary placeholder:text-content-secondary/50 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </div>
+          )}
+
           <div>
             <label className="mb-1.5 block text-sm font-medium text-content-primary">
               Email

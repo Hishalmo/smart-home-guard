@@ -17,7 +17,7 @@ export function TopBar() {
   const navigate = useNavigate()
   const { theme, toggleTheme } = useThemeStore()
   const unreadCount = useAlertStore((s) => s.unreadCount)
-  const { user, logout } = useAuth()
+  const { user, username, logout } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
 
   const title = routeTitles[location.pathname] ?? 'SmartHomeGuard'
@@ -56,7 +56,7 @@ export function TopBar() {
             onClick={() => setMenuOpen(!menuOpen)}
             className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-content-secondary hover:bg-surface-base"
           >
-            <span className="max-w-[160px] truncate">{user?.email ?? 'User'}</span>
+            <span className="max-w-[160px] truncate">{username ?? user?.email ?? 'User'}</span>
             <ChevronDown className={clsx('h-4 w-4 transition-transform', menuOpen && 'rotate-180')} />
           </button>
 
@@ -65,7 +65,8 @@ export function TopBar() {
               <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
               <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-lg border border-border bg-surface-raised py-1 shadow-lg">
                 <div className="border-b border-border px-4 py-2 text-xs text-content-secondary">
-                  {user?.email}
+                  {username && <p className="font-medium text-content-primary">{username}</p>}
+                  <p>{user?.email}</p>
                 </div>
                 <button
                   onClick={handleLogout}
