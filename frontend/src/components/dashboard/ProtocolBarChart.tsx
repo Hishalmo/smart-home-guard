@@ -92,7 +92,7 @@ export function ProtocolBarChart({ protocolCounts, loading }: ProtocolBarChartPr
             }}
             cursor={{ fill: 'hsl(var(--border) / 0.3)' }}
           />
-          <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+          <Bar dataKey="count" radius={[0, 4, 4, 0]} isAnimationActive={false}>
             {data.map((entry) => (
               <Cell
                 key={entry.protocol}

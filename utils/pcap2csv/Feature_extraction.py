@@ -509,3 +509,370 @@ class Feature_extraction():
         return True
 
 
+    def pcap_evaluation_stream(self, pcap_file, packets_per_flow: int = 10):
+        """Streaming variant of pcap_evaluation.
+
+        Yields one dict per completed 10-packet window:
+            {"features": {<raw feature columns>}, "identity": {src_ip, dst_ip, src_port, dst_port, protocol_name}}
+
+        Single dpkt pass, no scapy rdpcap preload (zigbee/bluetooth features
+        are not part of the model input, so dropping that branch is safe).
+        State accumulators are local (not globals).
+        """
+        import socket as _socket
+
+        ethsize = []
+        src_ports = {}
+        dst_ports = {}
+        tcpflows = {}
+        udpflows = {}
+        src_packet_count = {}
+        dst_packet_count = {}
+        dst_port_packet_count = {}
+        src_ip_byte, dst_ip_byte = {}, {}
+        tcp_flow_flags = {}
+        packets_per_protocol = {}
+        average_per_proto_src = {}
+        average_per_proto_dst = {}
+        average_per_proto_src_port, average_per_proto_dst_port = {}, {}
+        ips = set()
+        number_of_packets_per_trabsaction = 0
+        rate, srate, drate = 0, 0, 0
+        first_pac_time = 0
+        last_pac_time = 0
+        incoming_pack = []
+        outgoing_pack = []
+        total_du = 0
+
+        buffer: list[dict] = []
+
+        with open(pcap_file, 'rb') as f:
+            try:
+                pcap = dpkt.pcap.Reader(f)
+            except ValueError:
+                f.seek(0)
+                pcap = dpkt.pcapng.Reader(f)
+
+            for ts, buf in pcap:
+                try:
+                    eth = dpkt.ethernet.Ethernet(buf)
+                except Exception:
+                    continue
+
+                ethernet_frame_size = len(eth)
+                total_du = total_du + ts
+
+                src_port, src_ip_s, dst_port, duration = 0, "UNKNOWN", 0, 0
+                dst_ip_s, proto_type, protocol_name = "UNKNOWN", 0, "UNKNOWN"
+                flow_duration, flow_byte = 0, 0
+                src_byte_count, dst_byte_count = 0, 0
+                connection_status = 0
+                IAT = 0
+                src_to_dst_pkt, dst_to_src_pkt = 0, 0
+                src_to_dst_byte, dst_to_src_byte = 0, 0
+                flag_valus = []
+                ack_count, syn_count, fin_count, urg_count, rst_count = 0, 0, 0, 0, 0
+                udp, tcp, http, https, arp, smtp, irc, ssh, dns, ipv, icmp, igmp, mqtt, coap = (
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                )
+                telnet, dhcp, llc, mac, rarp = 0, 0, 0, 0, 0
+                sum_packets, min_packets, max_packets, mean_packets, std_packets = 0, 0, 0, 0, 0
+                magnite, radius, correlation, covaraince, var_ratio, weight = 0, 0, 0, 0, 0, 0
+                idle_time, active_time = 0, 0
+                ds_status, sequence, pack_id, fragments = 0, 0, 0, 0
+
+                if eth.type == dpkt.ethernet.ETH_TYPE_IP or eth.type == dpkt.ethernet.ETH_TYPE_ARP:
+                    ethsize.append(ethernet_frame_size)
+                    srcs = {}
+                    dsts = {}
+                    if len(ethsize) % 20 == 0:
+                        dy = Dynamic_features()
+                        sum_packets, min_packets, max_packets, mean_packets, std_packets = dy.dynamic_calculation(ethsize)
+                        magnite, radius, correlation, covaraince, var_ratio, weight = dy.dynamic_two_streams(
+                            incoming_pack, outgoing_pack
+                        )
+                        ethsize = []
+                        incoming_pack = []
+                        outgoing_pack = []
+                        first_pac_time = 0
+                        last_pac_time = ts
+                        IAT = last_pac_time - first_pac_time
+                        first_pac_time = last_pac_time
+                    else:
+                        dy = Dynamic_features()
+                        sum_packets, min_packets, max_packets, mean_packets, std_packets = dy.dynamic_calculation(ethsize)
+                        last_pac_time = ts
+                        IAT = last_pac_time - first_pac_time
+                        first_pac_time = last_pac_time
+                        con_basic = Connectivity_features_basic(eth.data)
+                        try:
+                            dst_tmp = con_basic.get_destination_ip()
+                        except Exception:
+                            dst_tmp = None
+                        try:
+                            src_tmp = con_basic.get_source_ip()
+                        except Exception:
+                            src_tmp = None
+                        if src_tmp is not None:
+                            dsts[src_tmp] = 1
+                            outgoing_pack.append(ethernet_frame_size)
+                        if dst_tmp is not None:
+                            srcs[dst_tmp] = 1
+                            incoming_pack.append(ethernet_frame_size)
+                        magnite, radius, correlation, covaraince, var_ratio, weight = dy.dynamic_two_streams(
+                            incoming_pack, outgoing_pack
+                        )
+
+                    if eth.type == dpkt.ethernet.ETH_TYPE_IP:
+                        ipv = 1
+                        ip = eth.data
+                        con_basic = Connectivity_features_basic(ip)
+
+                        src_ip = con_basic.get_source_ip()
+                        proto_type = con_basic.get_protocol_type()
+                        dst_ip = con_basic.get_destination_ip()
+
+                        try:
+                            src_ip_s = _socket.inet_ntoa(ip.src) if isinstance(ip.src, (bytes, bytearray)) else str(src_ip)
+                        except Exception:
+                            src_ip_s = str(src_ip)
+                        try:
+                            dst_ip_s = _socket.inet_ntoa(ip.dst) if isinstance(ip.dst, (bytes, bytearray)) else str(dst_ip)
+                        except Exception:
+                            dst_ip_s = str(dst_ip)
+
+                        ips.add(dst_ip)
+                        ips.add(src_ip)
+
+                        con_time = Connectivity_features_time(ip)
+                        duration = con_time.duration()
+                        potential_packet = ip.data
+
+                        conn_flags_bytes = Connectivity_features_flags_bytes(ip)
+                        src_byte_count, dst_byte_count = conn_flags_bytes.count(src_ip_byte, dst_ip_byte)
+
+                        l_three = L3(potential_packet)
+                        udp = l_three.udp()
+                        tcp = l_three.tcp()
+
+                        protocol_name = get_protocol_name(proto_type)
+                        if protocol_name == "ICMP":
+                            icmp = 1
+                        elif protocol_name == "IGMP":
+                            igmp = 1
+
+                        l_one = L1(potential_packet)
+                        llc = l_one.LLC()
+                        mac = l_one.MAC()
+
+                        calculate_packets_counts_per_ips_proto(
+                            average_per_proto_src, protocol_name, src_ip,
+                            average_per_proto_dst, dst_ip,
+                        )
+                        calculate_packets_count_per_ports_proto(
+                            average_per_proto_src_port, average_per_proto_dst_port,
+                            protocol_name, src_port, dst_port,
+                        )
+
+                        if src_ip not in src_packet_count:
+                            src_packet_count[src_ip] = 1
+                        else:
+                            src_packet_count[src_ip] += 1
+                        if dst_ip not in dst_packet_count:
+                            dst_packet_count[dst_ip] = 1
+                        else:
+                            dst_packet_count[dst_ip] += 1
+
+                        l_four_both = L4(src_port, dst_port)
+                        coap = l_four_both.coap()
+                        smtp = l_four_both.smtp()
+
+                        if type(potential_packet) == dpkt.udp.UDP:
+                            src_port = con_basic.get_source_port()
+                            dst_port = con_basic.get_destination_port()
+                            l_four = L4(src_port, dst_port)
+                            l_two = L2(src_port, dst_port)
+                            dhcp = l_two.dhcp()
+                            dns = l_four.dns()
+                            dst_port_packet_count[dst_port] = dst_port_packet_count.get(dst_port, 0) + 1
+                            flow = sorted([(src_ip, src_port), (dst_ip, dst_port)])
+                            flow = (flow[0], flow[1])
+                            flow_data = {'byte_count': len(eth), 'ts': ts}
+                            udpflows.setdefault(flow, []).append(flow_data)
+                            packets = udpflows[flow]
+                            number_of_packets_per_trabsaction = len(packets)
+                            flow_byte, flow_duration, max_duration, min_duration, sum_duration, average_duration, std_duration, idle_time, active_time = get_flow_info(udpflows, flow)
+                            src_to_dst_pkt, dst_to_src_pkt, src_to_dst_byte, dst_to_src_byte = get_src_dst_packets(udpflows, flow)
+                        elif type(potential_packet) == dpkt.tcp.TCP:
+                            src_port = con_basic.get_source_port()
+                            dst_port = con_basic.get_destination_port()
+                            dst_port_packet_count[dst_port] = dst_port_packet_count.get(dst_port, 0) + 1
+                            flag_valus = get_flag_values(ip.data)
+                            l_four = L4(src_port, dst_port)
+                            http = l_four.http()
+                            https = l_four.https()
+                            ssh = l_four.ssh()
+                            irc = l_four.IRC()
+                            smtp = l_four.smtp()
+                            mqtt = l_four.mqtt()
+                            telnet = l_four.telnet()
+
+                            try:
+                                http_info = dpkt.http.Response(ip.data)
+                                connection_status = http_info.status
+                            except Exception:
+                                connection_status = 0
+
+                            flow = sorted([(src_ip, src_port), (dst_ip, dst_port)])
+                            flow = (flow[0], flow[1])
+                            flow_data = {'byte_count': len(eth), 'ts': ts}
+                            if tcpflows.get(flow):
+                                tcpflows[flow].append(flow_data)
+                                ack_count, syn_count, fin_count, urg_count, rst_count = tcp_flow_flags[flow]
+                                ack_count, syn_count, fin_count, urg_count, rst_count = compare_flow_flags(
+                                    flag_valus, ack_count, syn_count, fin_count, urg_count, rst_count
+                                )
+                                tcp_flow_flags[flow] = [ack_count, syn_count, fin_count, urg_count, rst_count]
+                            else:
+                                tcpflows[flow] = [flow_data]
+                                ack_count, syn_count, fin_count, urg_count, rst_count = compare_flow_flags(
+                                    flag_valus, ack_count, syn_count, fin_count, urg_count, rst_count
+                                )
+                                tcp_flow_flags[flow] = [ack_count, syn_count, fin_count, urg_count, rst_count]
+
+                            packets = tcpflows[flow]
+                            number_of_packets_per_trabsaction = len(packets)
+                            flow_byte, flow_duration, max_duration, min_duration, sum_duration, average_duration, std_duration, idle_time, active_time = get_flow_info(tcpflows, flow)
+                            src_to_dst_pkt, dst_to_src_pkt, src_to_dst_byte, dst_to_src_byte = get_src_dst_packets(tcpflows, flow)
+
+                        if flow_duration != 0:
+                            rate = number_of_packets_per_trabsaction / flow_duration
+                            srate = src_to_dst_pkt / flow_duration
+                            drate = dst_to_src_pkt / flow_duration
+
+                        dst_port_packet_count[dst_port] = dst_port_packet_count.get(dst_port, 0) + 1
+
+                    elif eth.type == dpkt.ethernet.ETH_TYPE_ARP:
+                        protocol_name = "ARP"
+                        arp = 1
+                        packets_per_protocol[protocol_name] = packets_per_protocol.get(protocol_name, 0) + 1
+                        calculate_packets_counts_per_ips_proto(
+                            average_per_proto_src, protocol_name, src_ip_s,
+                            average_per_proto_dst, dst_ip_s,
+                        )
+                    elif eth.type == dpkt.ethernet.ETH_TYPE_REVARP:
+                        rarp = 1
+
+                    if len(flag_valus) == 0:
+                        flag_valus = [0, 0, 0, 0, 0, 0, 0, 0]
+
+                    new_row = {
+                        "ts": ts,
+                        "Protocol_name": protocol_name,
+                        "Duration": duration,
+                        "Protocol Type": proto_type,
+                        "flow_duration": flow_duration,
+                        "Header_Length": flow_byte,
+                        "src_ip_bytes": src_byte_count,
+                        "fin_flag_number": flag_valus[0],
+                        "syn_flag_number": flag_valus[1],
+                        "rst_flag_number": flag_valus[2],
+                        "psh_flag_number": flag_valus[3],
+                        "ack_flag_number": flag_valus[4],
+                        "urg_flag_number": flag_valus[5],
+                        "ece_flag_number": flag_valus[6],
+                        "cwr_flag_number": flag_valus[7],
+                        "dst_ip_bytes": dst_byte_count,
+                        "Rate": rate,
+                        "Srate": srate,
+                        "Drate": drate,
+                        "ack_count": ack_count,
+                        "syn_count": syn_count,
+                        "fin_count": fin_count,
+                        "urg_count": urg_count,
+                        "rst_count": rst_count,
+                        "CoAP": coap, "HTTP": http, "HTTPS": https, "DNS": dns,
+                        "Telnet": telnet, "SMTP": smtp, "SSH": ssh, "IRC": irc,
+                        "TCP": tcp, "UDP": udp, "DHCP": dhcp, "ARP": arp,
+                        "ICMP": icmp, "IGMP": igmp, "IPv": ipv, "LLC": llc,
+                        "Tot sum": sum_packets, "Min": min_packets, "Max": max_packets,
+                        "AVG": mean_packets, "Std": std_packets,
+                        "Tot size": ethernet_frame_size, "IAT": IAT, "Number": len(ethsize),
+                        "MAC": mac, "Magnitue": magnite, "Radius": radius,
+                        "Covariance": covaraince, "Variance": var_ratio, "Weight": weight,
+                        "_src_ip": src_ip_s, "_dst_ip": dst_ip_s,
+                        "_src_port": int(src_port) if src_port else 0,
+                        "_dst_port": int(dst_port) if dst_port else 0,
+                        "_protocol_name": protocol_name,
+                    }
+
+                    buffer.append(new_row)
+                    if len(buffer) >= packets_per_flow:
+                        yield _aggregate_flow_window(buffer)
+                        buffer = []
+
+            if buffer:
+                yield _aggregate_flow_window(buffer)
+
+
+def _aggregate_flow_window(rows: list[dict]) -> dict:
+    """Reduce N per-packet rows into one flow dict (features + identity)."""
+    df = pd.DataFrame(rows)
+
+    proto_mode = df["Protocol Type"].mode()
+    proto_mode_val = proto_mode.iloc[0] if not proto_mode.empty else 0
+
+    sum_ack = int(df["ack_count"].sum())
+    sum_syn = int(df["syn_count"].sum())
+    sum_fin = int(df["fin_count"].sum())
+    sum_rst = int(df["rst_count"].sum())
+    total_sum_of_lengths = float(df["Tot size"].sum())
+    min_packet_length = float(df["Tot size"].min())
+    max_packet_length = float(df["Tot size"].max())
+    mean_packet_length = float(df["Tot size"].mean())
+    std_packet_length = float(df["Tot size"].std()) if len(df) > 1 else 0.0
+    variance_packet_lengths = float(df["Tot size"].var()) if len(df) > 1 else 0.0
+    num_of_packets = float(df["Number"].sum())
+    ts_max = float(df["ts"].max())
+    ts_min = float(df["ts"].min())
+    duration_time_interval = ts_max - ts_min if ts_max != ts_min else 1.0
+
+    mean_row = df.drop(columns=["_src_ip", "_dst_ip", "_protocol_name"], errors="ignore").mean(numeric_only=True).to_dict()
+    mean_row["Protocol Type"] = proto_mode_val
+    mean_row["ack_count"] = sum_ack
+    mean_row["syn_count"] = sum_syn
+    mean_row["fin_count"] = sum_fin
+    mean_row["rst_count"] = sum_rst
+    mean_row["Tot sum"] = total_sum_of_lengths
+    mean_row["Min"] = min_packet_length
+    mean_row["Max"] = max_packet_length
+    mean_row["AVG"] = mean_packet_length
+    mean_row["Std"] = std_packet_length
+    mean_row["Number"] = num_of_packets
+    mean_row["Rate"] = num_of_packets / duration_time_interval
+    mean_row["Variance"] = variance_packet_lengths
+
+    def _mode_or(series, default):
+        m = series.dropna().mode()
+        if not m.empty:
+            return m.iloc[0]
+        nn = series.dropna()
+        return nn.iloc[0] if not nn.empty else default
+
+    src_ip = _mode_or(df["_src_ip"], "UNKNOWN")
+    dst_ip = _mode_or(df["_dst_ip"], "UNKNOWN")
+    proto_name = _mode_or(df["_protocol_name"], "UNKNOWN")
+    src_port = int(_mode_or(df.loc[df["_src_ip"] == src_ip, "_src_port"], 0))
+    dst_port = int(_mode_or(df.loc[df["_dst_ip"] == dst_ip, "_dst_port"], 0))
+
+    identity = {
+        "src_ip": str(src_ip),
+        "dst_ip": str(dst_ip),
+        "src_port": src_port,
+        "dst_port": dst_port,
+        "protocol_name": str(proto_name),
+    }
+
+    return {"features": mean_row, "identity": identity}
+
+

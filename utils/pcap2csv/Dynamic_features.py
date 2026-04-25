@@ -20,6 +20,8 @@ class Dynamic_features:
         return packets
 
     def dynamic_two_streams(self,incoming, outgoing):
+        if not incoming or not outgoing:
+            return 0, 0, 0, 0, 0, 0
 
         inco_ave = sum(incoming) / len(incoming)
         outgoing_ave = sum(outgoing) / len(outgoing)
@@ -28,8 +30,8 @@ class Dynamic_features:
         inco_var = np.var(incoming)
         outgo_var = np.var(outgoing)
         radius = (inco_var + outgo_var) ** 0.5
-        if len(incoming) and len(outgoing) >= 2:
-            correlation, p_value = stats.pearsonr(incoming, outgoing)
+        if len(incoming) >= 2 and len(outgoing) >= 2 and inco_var > 0 and outgo_var > 0:
+            correlation, _ = stats.pearsonr(incoming, outgoing)
         else:
             correlation = 0
 

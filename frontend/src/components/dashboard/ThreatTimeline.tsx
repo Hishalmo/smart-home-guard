@@ -102,6 +102,7 @@ export function ThreatTimeline({ timelineData }: ThreatTimelineProps) {
             strokeWidth={2}
             dot={false}
             fill="none"
+            isAnimationActive={false}
           />
           <Line
             type="monotone"
@@ -111,6 +112,7 @@ export function ThreatTimeline({ timelineData }: ThreatTimelineProps) {
             strokeWidth={2}
             dot={false}
             fill="none"
+            isAnimationActive={false}
           />
           <Line
             type="monotone"
@@ -120,6 +122,7 @@ export function ThreatTimeline({ timelineData }: ThreatTimelineProps) {
             strokeWidth={2}
             dot={false}
             fill="none"
+            isAnimationActive={false}
           />
         </LineChart>
       </ResponsiveContainer>

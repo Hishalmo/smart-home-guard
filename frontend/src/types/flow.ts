@@ -18,7 +18,7 @@ export interface NetworkFlow {
   rstFlagNumber: number
   pshFlagNumber: number
   ackFlagNumber: number
-  urgFlagNumber: number
+  urgFlagNumber?: number
   eceFlagNumber: number
   cwrFlagNumber: number
   ackCount: number
@@ -31,8 +31,8 @@ export interface NetworkFlow {
   sumLength: number
   avgLength: number
   stdLength: number
-  mqtt: 0 | 1
-  coap: 0 | 1
+  mqtt?: 0 | 1
+  coap?: 0 | 1
   http: 0 | 1
   https: 0 | 1
   dns: 0 | 1
@@ -41,15 +41,15 @@ export interface NetworkFlow {
   udp: 0 | 1
   arp: 0 | 1
   icmp: 0 | 1
-  igmp: 0 | 1
+  igmp?: 0 | 1
   totSum: number
   totSize: number
   iat: number
   magnitude: number
   covariance: number
   variance: number
-  flowIdleTime: number
-  flowActiveTime: number
+  flowIdleTime?: number
+  flowActiveTime?: number
   prediction: PredictionResult
 }
 

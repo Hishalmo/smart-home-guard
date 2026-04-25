@@ -15,9 +15,9 @@ if __name__ == '__main__':
     
     pcapfiles = [file for file in os.listdir('pcaps/') if file.endswith('.pcap')]
     subfiles_size = 10 # MB
-    split_directory = 'pcap2csv/split_temp/'
-    destination_directory = 'pcap2csv/output/'
-    converted_csv_files_directory = 'pcap2csv/csv_files/'
+    split_directory = 'split_temp/'
+    destination_directory = 'output/'
+    converted_csv_files_directory = 'csv_files/'
     n_threads = 8
     
     address = "./"

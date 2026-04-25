@@ -74,6 +74,7 @@ export function TrafficDonut({ summary, loading }: TrafficDonutProps) {
               outerRadius="85%"
               paddingAngle={2}
               stroke="none"
+              isAnimationActive={false}
             >
               {data.map((entry) => (
                 <Cell key={entry.name} fill={entry.color} />

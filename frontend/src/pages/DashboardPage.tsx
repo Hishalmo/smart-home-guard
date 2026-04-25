@@ -11,6 +11,7 @@ import { ScanPanel } from '@/components/scan/ScanPanel'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { useScanStore } from '@/store/scanStore'
 import { useRealtimeFlows } from '@/hooks/useRealtimeFlows'
+import { useSessionStatus } from '@/hooks/useSessionStatus'
 import type { NetworkFlow } from '@/types'
 
 interface TimelinePoint {
@@ -27,7 +28,7 @@ function computeFlagData(flows: NetworkFlow[]) {
   if (flows.length === 0) return []
   const n = flows.length
   const sum = (key: keyof NetworkFlow) =>
-    flows.reduce((acc, f) => acc + (f[key] as number), 0)
+    flows.reduce((acc, f) => acc + (Number(f[key]) || 0), 0)
 
   const raw = {
     FIN: sum('finFlagNumber'),
@@ -41,14 +42,18 @@ function computeFlagData(flows: NetworkFlow[]) {
   }
 
   const max = Math.max(...Object.values(raw), 1)
+  if (max <= 0) {
+    return Object.keys(raw).map((flag) => ({ flag, value: 0 }))
+  }
   return Object.entries(raw).map(([flag, total]) => ({
     flag,
-    value: parseFloat((total / n / (max / n)).toFixed(3)),
+    value: parseFloat((total / max).toFixed(3)),
   }))
 }
 
 export function DashboardPage() {
   useRealtimeFlows()
+  useSessionStatus()
 
   const status = useScanStore((s) => s.status)
   const flowSummary = useScanStore((s) => s.flowSummary)

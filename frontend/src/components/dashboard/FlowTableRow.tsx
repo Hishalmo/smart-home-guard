@@ -62,7 +62,6 @@ function FlowTableRowInner({ flow, isExpanded, onToggle }: FlowTableRowProps) {
     ['RST', flow.rstFlagNumber],
     ['PSH', flow.pshFlagNumber],
     ['ACK', flow.ackFlagNumber],
-    ['URG', flow.urgFlagNumber],
     ['ECE', flow.eceFlagNumber],
     ['CWR', flow.cwrFlagNumber],
     ['ack_count', flow.ackCount],
@@ -73,8 +72,6 @@ function FlowTableRowInner({ flow, isExpanded, onToggle }: FlowTableRowProps) {
   ]
 
   const protocolFlags: Array<[string, string | number]> = [
-    ['mqtt', flow.mqtt],
-    ['coap', flow.coap],
     ['http', flow.http],
     ['https', flow.https],
     ['dns', flow.dns],
@@ -98,8 +95,6 @@ function FlowTableRowInner({ flow, isExpanded, onToggle }: FlowTableRowProps) {
     ['magnitude', flow.magnitude.toFixed(2)],
     ['covariance', flow.covariance.toFixed(2)],
     ['variance', flow.variance.toFixed(2)],
-    ['flow_idle_time', flow.flowIdleTime.toFixed(2)],
-    ['flow_active_time', flow.flowActiveTime.toFixed(2)],
   ]
 
   return (
@@ -110,9 +105,8 @@ function FlowTableRowInner({ flow, isExpanded, onToggle }: FlowTableRowProps) {
       >
         <td className="px-3 py-2">
           <ChevronRight
-            className={`h-4 w-4 text-content-secondary transition-transform ${
-              isExpanded ? 'rotate-90' : ''
-            }`}
+            className={`h-4 w-4 text-content-secondary transition-transform ${isExpanded ? 'rotate-90' : ''
+              }`}
           />
         </td>
         <td className="px-3 py-2 font-mono text-xs text-content-secondary">{time}</td>

@@ -88,6 +88,7 @@ export function TcpFlagRadar({ flagData }: TcpFlagRadarProps) {
             stroke="hsl(var(--accent))"
             fill="hsl(var(--accent))"
             fillOpacity={0.4}
+            isAnimationActive={false}
           />
         </RadarChart>
       </ResponsiveContainer>

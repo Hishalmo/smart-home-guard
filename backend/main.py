@@ -14,7 +14,13 @@ from backend.routers import health, analysis, scan
 from backend.services.feature_service import FeatureService
 from backend.services.ml_service import MLService
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                    handlers=[
+                        logging.StreamHandler(),
+                        logging.FileHandler("backend.log"),
+                        ]
+                    )
 logger = logging.getLogger(__name__)
 
 

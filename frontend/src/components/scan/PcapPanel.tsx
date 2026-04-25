@@ -17,7 +17,7 @@ export function PcapPanel() {
 
   function handleRetry() {
     resetScan()
-    setFile(null)
+    if (file) mutate(file)
   }
 
   return (

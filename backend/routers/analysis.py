@@ -26,14 +26,14 @@ from fastapi import (
 )
 
 from backend.middleware.auth import verify_token
-from backend.models.enums import CATEGORY_SEVERITY, ClassLabel
+from backend.models.enums import ClassLabel
 from backend.models.schemas import (
     AnalysisSummary,
     AnalyzeResponse,
     FlowResult,
     TopSourceIp,
 )
-from backend.services.feature_service import FeatureService
+from backend.services.feature_service import MODEL_FEATURES, FeatureService
 from backend.services.ml_service import MLService
 from backend.services.supabase_client import make_user_client
 from backend.utils.pcap_validator import validate_pcap
@@ -42,9 +42,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-BACKGROUND_THRESHOLD_BYTES = 20 * 1024 * 1024  # 20 MB
 UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB streaming chunks
-FLOW_INSERT_BATCH = 500
+INFERENCE_BATCH = 64  # flows per inference + DB insert batch
 
 
 def _bearer_from_header(authorization: str | None) -> str:
@@ -68,121 +67,100 @@ async def _stream_upload_to_temp(file: UploadFile) -> Path:
     return tmp_path
 
 
-def _build_summary(
-    flows: list[FlowResult], connectivity: pd.DataFrame
-) -> AnalysisSummary:
-    counts = Counter(f.predicted_category for f in flows)
-    protocol_counts = Counter(f.protocol_name for f in flows if f.protocol_name)
-    top_ips = Counter(
-        ip for ip in connectivity["src_ip"].tolist() if ip and ip != "UNKNOWN"
-    ).most_common(10)
-
-    return AnalysisSummary(
-        total_flows=len(flows),
-        benign_count=counts.get(ClassLabel.BENIGN, 0),
-        spoofing_count=counts.get(ClassLabel.SPOOFING, 0),
-        recon_count=counts.get(ClassLabel.RECON, 0),
-        brute_force_count=counts.get(ClassLabel.BRUTE_FORCE, 0),
-        protocol_counts=dict(protocol_counts),
-        top_source_ips=[TopSourceIp(ip=ip, count=count) for ip, count in top_ips],
-    )
+def _normalize_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Lowercase/underscore columns and align to the 46 MODEL_FEATURES columns."""
+    df = df.copy()
+    df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+    for col in MODEL_FEATURES:
+        if col not in df.columns:
+            df[col] = 0
+    df = df[MODEL_FEATURES].fillna(0)
+    return df
 
 
-def _build_flow_rows(
-    features_df: pd.DataFrame,
-    identity_df: pd.DataFrame,
+def _build_streaming_flow_rows(
+    batch: list[dict],
     predictions: list[dict],
-) -> tuple[list[FlowResult], list[dict[str, Any]]]:
-    """Return (pydantic FlowResult list, supabase insert payload list)."""
-    flows: list[FlowResult] = []
-    supabase_rows: list[dict[str, Any]] = []
-
-    for i, pred in enumerate(predictions):
-        feat_row = features_df.iloc[i]
-        ident_row = identity_df.iloc[i]
-        flow_id = str(uuid.uuid4())
+    session_id: str,
+    user_id: str,
+) -> list[dict[str, Any]]:
+    """Convert a batch of {features, identity} + predictions into flow_events insert payload."""
+    rows: list[dict[str, Any]] = []
+    for flow_dict, pred in zip(batch, predictions, strict=False):
+        features = flow_dict["features"]
+        identity = flow_dict["identity"]
 
         features_json = {
-            col: (val.item() if hasattr(val, "item") else val)
-            for col, val in feat_row.items()
+            k.lower().replace(" ", "_"): (v.item() if hasattr(v, "item") else v)
+            for k, v in features.items()
         }
 
-        flow = FlowResult(
-            id=flow_id,
-            source_ip=str(ident_row["src_ip"]),
-            destination_ip=str(ident_row["dst_ip"]),
-            source_port=int(ident_row["src_port"]),
-            destination_port=int(ident_row["dst_port"]),
-            protocol_name=str(ident_row["protocol_name"]),
-            flow_duration=float(features_json.get("flow_duration", 0) or 0),
-            rate=float(features_json.get("rate", 0) or 0),
-            fin_flag_number=int(features_json.get("fin_flag_number", 0) or 0),
-            syn_flag_number=int(features_json.get("syn_flag_number", 0) or 0),
-            rst_flag_number=int(features_json.get("rst_flag_number", 0) or 0),
-            psh_flag_number=int(features_json.get("psh_flag_number", 0) or 0),
-            ack_flag_number=int(features_json.get("ack_flag_number", 0) or 0),
-            urg_flag_number=int(features_json.get("urg_flag_number", 0) or 0),
-            ece_flag_number=int(features_json.get("ece_flag_number", 0) or 0),
-            cwr_flag_number=int(features_json.get("cwr_flag_number", 0) or 0),
-            predicted_category=pred["predicted_category"],
-            confidence=pred["confidence"],
-            features=features_json,
-        )
-        flows.append(flow)
-
-        supabase_rows.append({
-            "id": flow_id,
-            "source_ip": flow.source_ip,
-            "destination_ip": flow.destination_ip,
-            "source_port": flow.source_port,
-            "destination_port": flow.destination_port,
-            "protocol_name": flow.protocol_name,
-            "protocol_type": int(features_json.get("protocol_type", 0) or 0),
-            "predicted_category": flow.predicted_category.value,
-            "confidence": flow.confidence,
-            "features_json": features_json,
-        })
-
-    return flows, supabase_rows
-
-
-def _build_alert_rows(
-    flows: list[FlowResult], session_id: str, user_id: str
-) -> list[dict[str, Any]]:
-    alerts: list[dict[str, Any]] = []
-    for flow in flows:
-        if flow.predicted_category == ClassLabel.BENIGN:
-            continue
-        severity = CATEGORY_SEVERITY[flow.predicted_category]
-        message = (
-            f"{flow.predicted_category.value} detected from "
-            f"{flow.source_ip} → {flow.destination_ip} via {flow.protocol_name}"
-        )
-        alerts.append({
+        rows.append({
+            "id": str(uuid.uuid4()),
             "session_id": session_id,
             "user_id": user_id,
-            "flow_id": flow.id,
-            "severity": severity.value,
-            "category": flow.predicted_category.value,
-            "source_ip": flow.source_ip,
-            "destination_ip": flow.destination_ip,
-            "message": message,
+            "source_ip": identity.get("src_ip", "UNKNOWN"),
+            "destination_ip": identity.get("dst_ip", "UNKNOWN"),
+            "source_port": int(identity.get("src_port", 0) or 0),
+            "destination_port": int(identity.get("dst_port", 0) or 0),
+            "protocol_name": identity.get("protocol_name", "UNKNOWN"),
+            "protocol_type": int(features_json.get("protocol_type", 0) or 0),
+            "predicted_category": pred["predicted_category"].value,
+            "confidence": pred["confidence"],
+            "features_json": features_json,
         })
-    return alerts
+    return rows
 
 
-def _insert_flows_chunked(
-    supabase, rows: list[dict[str, Any]], session_id: str, user_id: str
+async def _flush_batch(
+    *,
+    batch: list[dict],
+    ml_service: MLService,
+    supabase,
+    session_id: str,
+    user_id: str,
+    totals: dict,
+    protocol_counter: Counter,
+    top_ip_counter: Counter,
 ) -> None:
-    for row in rows:
-        row["session_id"] = session_id
-        row["user_id"] = user_id
-    for i in range(0, len(rows), FLOW_INSERT_BATCH):
-        batch = rows[i : i + FLOW_INSERT_BATCH]
-        supabase.table("flow_events").insert(batch).execute()
+    """Run inference on `batch`, insert flow_events, update running counters."""
+    if not batch:
+        return
+
+    features_df = pd.DataFrame([f["features"] for f in batch])
+    features_df = _normalize_features(features_df)
+    predictions = ml_service.predict(features_df)
+
+    flow_rows = _build_streaming_flow_rows(batch, predictions, session_id, user_id)
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None, lambda: supabase.table("flow_events").insert(flow_rows).execute()
+    )
+
+    for flow_dict, pred in zip(batch, predictions, strict=False):
+        category = pred["predicted_category"]
+        totals["total_flows"] += 1
+        if category == ClassLabel.BENIGN:
+            totals["benign"] += 1
+        else:
+            totals["threat_count"] += 1
+            if category == ClassLabel.SPOOFING:
+                totals["spoofing"] += 1
+            elif category == ClassLabel.RECON:
+                totals["recon"] += 1
+            elif category == ClassLabel.BRUTE_FORCE:
+                totals["brute_force"] += 1
+
+        proto = flow_dict["identity"].get("protocol_name")
+        if proto:
+            protocol_counter[proto] += 1
+        src_ip = flow_dict["identity"].get("src_ip")
+        if src_ip and src_ip != "UNKNOWN":
+            top_ip_counter[src_ip] += 1
 
 
-async def _run_pipeline(
+async def _run_streaming_pipeline(
     *,
     ml_service: MLService,
     feature_service: FeatureService,
@@ -190,41 +168,60 @@ async def _run_pipeline(
     session_id: str,
     user_id: str,
     user_jwt: str,
-) -> tuple[list[FlowResult], AnalysisSummary]:
-    """Feature extraction → inference → Supabase writes. Shared by sync + async paths."""
-    features_df = await feature_service.extract_features(str(tmp_path))
-    flow_count = len(features_df)
-    identity_df = await feature_service.aggregate_connectivity_per_flow(
-        str(tmp_path), flow_count=flow_count
-    )
-    connectivity_df = await feature_service.extract_connectivity_info(str(tmp_path))
-
-    predictions = ml_service.predict(features_df)
-    flows, flow_payload = _build_flow_rows(features_df, identity_df, predictions)
-    alerts = _build_alert_rows(flows, session_id, user_id)
-    summary = _build_summary(flows, connectivity_df)
-
+) -> None:
+    """Stream flows from the PCAP, infer in batches of INFERENCE_BATCH, write live."""
     supabase = make_user_client(user_jwt)
+
+    buffer: list[dict] = []
+    totals = {
+        "total_flows": 0, "threat_count": 0,
+        "benign": 0, "spoofing": 0, "recon": 0, "brute_force": 0,
+    }
+    protocol_counter: Counter[str] = Counter()
+    top_ip_counter: Counter[str] = Counter()
+
+    async def flush() -> None:
+        nonlocal buffer
+        await _flush_batch(
+            batch=buffer, ml_service=ml_service, supabase=supabase,
+            session_id=session_id, user_id=user_id, totals=totals,
+            protocol_counter=protocol_counter, top_ip_counter=top_ip_counter,
+        )
+        buffer = []
+
+    async for flow in feature_service.stream_flows(str(tmp_path)):
+        buffer.append(flow)
+        if len(buffer) >= INFERENCE_BATCH:
+            await flush()
+
+    # Flush any remaining flows in the buffer
+    if buffer:
+        await flush()
+
+    summary = AnalysisSummary(
+        total_flows=totals["total_flows"],
+        benign_count=totals["benign"],
+        spoofing_count=totals["spoofing"],
+        recon_count=totals["recon"],
+        brute_force_count=totals["brute_force"],
+        protocol_counts=dict(protocol_counter),
+        top_source_ips=[
+            TopSourceIp(ip=ip, count=count)
+            for ip, count in top_ip_counter.most_common(10)
+        ],
+    )
+
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(
-        None, _insert_flows_chunked, supabase, flow_payload, session_id, user_id
+        None,
+        lambda: supabase.table("scan_sessions").update({
+            "status": "completed",
+            "ended_at": datetime.now(timezone.utc).isoformat(),
+            "total_flows": totals["total_flows"],
+            "threat_count": totals["threat_count"],
+            "summary_json": summary.model_dump(),
+        }).eq("id", session_id).execute(),
     )
-    if alerts:
-        await loop.run_in_executor(
-            None, lambda: supabase.table("alerts").insert(alerts).execute()
-        )
-
-    supabase.table("scan_sessions").update({
-        "status": "completed",
-        "ended_at": datetime.now(timezone.utc).isoformat(),
-        "total_flows": len(flows),
-        "threat_count": sum(
-            1 for f in flows if f.predicted_category != ClassLabel.BENIGN
-        ),
-        "summary_json": summary.model_dump(),
-    }).eq("id", session_id).execute()
-
-    return flows, summary
 
 
 def _mark_session_error(user_jwt: str, session_id: str, detail: str) -> None:
@@ -248,7 +245,7 @@ async def _background_pipeline(
     user_jwt: str,
 ) -> None:
     try:
-        await _run_pipeline(
+        await _run_streaming_pipeline(
             ml_service=ml_service,
             feature_service=feature_service,
             tmp_path=tmp_path,
@@ -271,7 +268,11 @@ async def analyze_pcap(
     authorization: str | None = Header(default=None),
     claims: dict = Depends(verify_token),
 ) -> AnalyzeResponse:
-    """Analyze a PCAP file and persist flows + alerts for the caller."""
+    """Start a streaming PCAP analysis. Returns immediately with session_id.
+
+    Flows and alerts arrive on the frontend via Supabase realtime as the
+    background pipeline inserts them batch-by-batch.
+    """
     t0 = time.time()
     user_id = claims["sub"]
     user_jwt = _bearer_from_header(authorization)
@@ -305,50 +306,24 @@ async def analyze_pcap(
 
     session_id = session_insert.data[0]["id"]
 
-    if file_size > BACKGROUND_THRESHOLD_BYTES:
-        background_tasks.add_task(
-            _background_pipeline,
-            ml_service,
-            feature_service,
-            tmp_path,
-            session_id,
-            user_id,
-            user_jwt,
-        )
-        return AnalyzeResponse(
-            session_id=session_id,
-            flows=[],
-            summary=AnalysisSummary(
-                total_flows=0, benign_count=0, spoofing_count=0,
-                recon_count=0, brute_force_count=0,
-                protocol_counts={}, top_source_ips=[],
-            ),
-            processing_time_ms=0.0,
-        )
-
-    try:
-        flows, summary = await _run_pipeline(
-            ml_service=ml_service,
-            feature_service=feature_service,
-            tmp_path=tmp_path,
-            session_id=session_id,
-            user_id=user_id,
-            user_jwt=user_jwt,
-        )
-    except HTTPException:
-        _mark_session_error(user_jwt, session_id, "http error during analysis")
-        raise
-    except Exception as exc:
-        logger.exception("Analysis pipeline failed for session %s", session_id)
-        _mark_session_error(user_jwt, session_id, str(exc))
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    background_tasks.add_task(
+        _background_pipeline,
+        ml_service,
+        feature_service,
+        tmp_path,
+        session_id,
+        user_id,
+        user_jwt,
+    )
 
     return AnalyzeResponse(
         session_id=session_id,
-        flows=flows,
-        summary=summary,
+        flows=[],
+        summary=AnalysisSummary(
+            total_flows=0, benign_count=0, spoofing_count=0,
+            recon_count=0, brute_force_count=0,
+            protocol_counts={}, top_source_ips=[],
+        ),
         processing_time_ms=round((time.time() - t0) * 1000, 2),
     )
 
@@ -402,7 +377,7 @@ async def session_status(
 
     response = (
         supabase.table("scan_sessions")
-        .select("id, status, total_flows, threat_count, started_at, ended_at")
+        .select("id, status, total_flows, threat_count, started_at, ended_at, summary_json")
         .eq("id", session_id)
         .single()
         .execute()
@@ -418,4 +393,5 @@ async def session_status(
         "threat_count": response.data["threat_count"],
         "started_at": response.data["started_at"],
         "ended_at": response.data["ended_at"],
+        "summary_json": response.data.get("summary_json"),
     }

@@ -213,3 +213,8 @@ notebooks/catboost_info
 notebooks/models
 notebooks/random_forest_added_brute.ipynb
 notebooks/random_forest_no_drop.ipynb
+backend.log
+utils/pcap2csv/csv_files
+utils/pcap2csv/output
+utils/pcap2csv/pcaps
+utils/pcap2csv/split_temp

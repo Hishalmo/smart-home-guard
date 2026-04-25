@@ -6,7 +6,9 @@ import asyncio
 import logging
 import sys
 import tempfile
+import threading
 from pathlib import Path
+from typing import AsyncIterator
 
 import dpkt
 import pandas as pd
@@ -89,6 +91,45 @@ class FeatureService:
         return pd.DataFrame(rows, columns=[
             "src_ip", "dst_ip", "src_port", "dst_port", "protocol_name", "timestamp",
         ])
+
+    async def stream_flows(self, pcap_path: str) -> AsyncIterator[dict]:
+        """Yield {features, identity} dicts one at a time as flows complete.
+
+        Bridges the synchronous `pcap_evaluation_stream` generator (runs in a
+        worker thread) to the asyncio event loop via an `asyncio.Queue`. The
+        producer thread puts each flow onto the queue; the async consumer
+        awaits `queue.get()` and yields. A `None` sentinel marks end-of-stream.
+        Exceptions from the producer thread are re-raised on the consumer side.
+        """
+        from Feature_extraction import Feature_extraction  # noqa: N813
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=128)
+        SENTINEL = object()
+
+        def _producer() -> None:
+            fe = Feature_extraction()
+            try:
+                for flow in fe.pcap_evaluation_stream(pcap_path):
+                    asyncio.run_coroutine_threadsafe(queue.put(flow), loop).result()
+            except Exception as exc:
+                asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
+            finally:
+                asyncio.run_coroutine_threadsafe(queue.put(SENTINEL), loop).result()
+
+        thread = threading.Thread(target=_producer, name="pcap-stream", daemon=True)
+        thread.start()
+
+        try:
+            while True:
+                item = await queue.get()
+                if item is SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            thread.join(timeout=5)
 
     async def aggregate_connectivity_per_flow(
         self, pcap_path: str, flow_count: int, packets_per_flow: int = 10

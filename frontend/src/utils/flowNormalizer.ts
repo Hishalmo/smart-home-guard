@@ -1,5 +1,52 @@
 import type { NetworkFlow } from '@/types'
 
+const DEFAULT_FLOW: NetworkFlow = {
+  id: '',
+  sessionId: '',
+  timestamp: '',
+  sourceIp: 'UNKNOWN',
+  destinationIp: 'UNKNOWN',
+  sourcePort: 0,
+  destinationPort: 0,
+  protocolType: 0,
+  protocolName: 'UNKNOWN',
+  flowDuration: 0,
+  headerLength: 0,
+  rate: 0,
+  finFlagNumber: 0,
+  synFlagNumber: 0,
+  rstFlagNumber: 0,
+  pshFlagNumber: 0,
+  ackFlagNumber: 0,
+  eceFlagNumber: 0,
+  cwrFlagNumber: 0,
+  ackCount: 0,
+  synCount: 0,
+  finCount: 0,
+  urgCount: 0,
+  rstCount: 0,
+  maxLength: 0,
+  minLength: 0,
+  sumLength: 0,
+  avgLength: 0,
+  stdLength: 0,
+  http: 0,
+  https: 0,
+  dns: 0,
+  ssh: 0,
+  tcp: 0,
+  udp: 0,
+  arp: 0,
+  icmp: 0,
+  totSum: 0,
+  totSize: 0,
+  iat: 0,
+  magnitude: 0,
+  covariance: 0,
+  variance: 0,
+  prediction: { category: 'Benign', confidence: 0 },
+}
+
 const FIELD_MAP: Record<string, string> = {
   id: 'id',
   session_id: 'sessionId',
@@ -55,21 +102,31 @@ const FIELD_MAP: Record<string, string> = {
 }
 
 export function normalizeFlow(raw: Record<string, unknown>): NetworkFlow {
-  const result: Record<string, unknown> = {}
+  // The backend stores per-flow features inside a JSONB `features_json` column.
+  // Flatten it so FIELD_MAP can pick up flag numbers, rates, stats, etc.
+  const nested =
+    raw.features_json && typeof raw.features_json === 'object'
+      ? (raw.features_json as Record<string, unknown>)
+      : {}
+  const flat: Record<string, unknown> = { ...nested, ...raw }
 
+  const mapped: Record<string, unknown> = {}
   for (const [rawKey, tsKey] of Object.entries(FIELD_MAP)) {
-    if (rawKey in raw) {
-      result[tsKey] = raw[rawKey]
+    if (rawKey in flat && flat[rawKey] !== null && flat[rawKey] !== undefined) {
+      mapped[tsKey] = flat[rawKey]
     }
   }
 
-  // Assemble the prediction object from flat fields
-  if ('predicted_category' in raw || 'confidence' in raw) {
-    result.prediction = {
-      category: raw.predicted_category ?? raw.category ?? 'Benign',
-      confidence: Number(raw.confidence ?? 0),
+  if (!mapped.timestamp) {
+    mapped.timestamp = new Date().toISOString()
+  }
+
+  if ('predicted_category' in flat || 'confidence' in flat) {
+    mapped.prediction = {
+      category: flat.predicted_category ?? flat.category ?? 'Benign',
+      confidence: Number(flat.confidence ?? 0),
     }
   }
 
-  return result as unknown as NetworkFlow
+  return { ...DEFAULT_FLOW, ...mapped } as NetworkFlow
 }
